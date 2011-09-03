@@ -1,6 +1,11 @@
 #coding:utf8
 
+'''
+Example jailed Python REPL
+'''
+
 from code import interact
+import resource
 
 from sandboxed import Jail
 from sandboxed.utils import mount_python_lib
@@ -17,6 +22,7 @@ class InteractiveJail(Jail):
         umount(self.pylib_mount)
 
     def prisoner(self):
+        resource.setrlimit(resource.RLIMIT_NPROC, (1,1))
         interact()
 
 def main():
