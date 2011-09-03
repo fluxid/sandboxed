@@ -4,8 +4,10 @@
 Convenience utilities
 '''
 
+import distutils.sysconfig
 import errno
 import os
+import os.path
 import time
 
 from . import lowlevel
@@ -51,6 +53,33 @@ def mount_cgroup(path = '/cgroup'):
     '''
     try_mkdir(path)
     lowlevel.mount('cgroup', path, 'cgroup', 0, None)
+
+def mount_python_lib(path):
+    '''
+    Uses bind to mount Python standard library in given path.
+
+    When path becomes new root, Python library will have the same path,
+    so no major modifications in sys.path will be needed.
+
+    Returns two paths in 2tuple: original path to Python library and path of
+    mountpoint, to be unmounted when no longer needed.
+    '''
+    pylib = distutils.sysconfig.get_python_lib(standard_lib=True)
+    pylib = os.path.realpath(pylib)
+    pylib_mount = os.path.join(path, pylib[1:] if pylib.startswith('/') else pylib)
+    try:
+        os.makedirs(pylib_mount, exist_ok=True)
+    except TypeError:
+        # exist_ok since Python 3.2
+        os.makedirs(pylib_mount)
+
+    flags = const.MS_NODEV | const.MS_NOEXEC | const.MS_NOSUID | const.MS_NOATIME
+    mount_bind(pylib, pylib_mount, flags)
+    # Binds can be made read-only only after remount, not on first mount...
+    flags |= const.MS_REMOUNT | const.MS_RDONLY
+    mount_bind(pylib, pylib_mount, flags)
+
+    return (pylib, pylib_mount)
 
 def read_mounts():
     '''
