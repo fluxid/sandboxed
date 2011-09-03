@@ -1,0 +1,83 @@
+#coding:utf8
+
+'''
+Constants from header files
+'''
+
+import platform
+import sys
+
+# Syscall ids...
+machine = platform.machine()
+if machine in ('x86_64', 'i386', 'i686'):
+    if sys.maxsize > 2**32:
+        # arch/x86/include/asm/unistd_64.h
+        SYS_clone = 56
+        SYS_getpid = 39
+        SYS_getppid = 110
+    else:
+        # arch/x86/include/asm/unistd_32.h
+        SYS_clone = 120
+        SYS_getpid = 20
+        SYS_getppid = 64
+else:
+    raise EnvironmentError('Machine "{}" is not supported'.format(machine))
+
+# bits/sched.h
+
+CSIGNAL = 0x000000ff
+CLONE_VM = 0x00000100
+CLONE_FS = 0x00000200
+CLONE_FILES = 0x00000400
+CLONE_SIGHAND = 0x00000800
+CLONE_PTRACE = 0x00002000
+CLONE_VFORK = 0x00004000
+CLONE_PARENT = 0x00008000
+CLONE_THREAD = 0x00010000
+CLONE_NEWNS = 0x00020000
+CLONE_SYSVSEM = 0x00040000
+CLONE_SETTLS = 0x00080000
+CLONE_PARENT_SETTID = 0x00100000
+CLONE_CHILD_CLEARTID = 0x00200000
+CLONE_DETACHED = 0x00400000
+CLONE_UNTRACED = 0x00800000
+CLONE_CHILD_SETTID = 0x01000000
+CLONE_NEWUTS = 0x04000000
+CLONE_NEWIPC = 0x08000000
+CLONE_NEWUSER = 0x10000000
+CLONE_NEWPID = 0x20000000
+CLONE_NEWNET = 0x40000000
+CLONE_IO = 0x80000000
+
+# sys/mount.h
+
+MS_RDONLY = 1
+MS_NOSUID = 2
+MS_NODEV = 4
+MS_NOEXEC = 8
+MS_SYNCHRONOUS = 16
+MS_REMOUNT = 32
+MS_MANDLOCK = 64
+MS_DIRSYNC = 128
+MS_NOATIME = 1024
+MS_NODIRATIME = 2048
+MS_BIND = 4096
+MS_MOVE = 8192
+MS_REC = 16384
+MS_SILENT = 32768
+MS_POSIXACL = 1 << 16
+MS_UNBINDABLE = 1 << 17
+MS_PRIVATE = 1 << 18
+MS_SLAVE = 1 << 19
+MS_SHARED = 1 << 20
+MS_RELATIME = 1 << 21
+MS_KERNMOUNT = 1 << 22
+MS_I_VERSION =  1 << 23
+MS_STRICTATIME = 1 << 24
+MS_ACTIVE = 1 << 30
+MS_NOUSER = 1 << 31
+
+MNT_FORCE = 1
+MNT_DETACH = 2
+MNT_EXPIRE = 4
+UMOUNT_NOFOLLOW = 8

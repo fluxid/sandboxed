@@ -1,0 +1,8 @@
+*.py[co]
+*.sw[po]
+/venv
+/*.tar.gz
+/build
+/dist
+/pyhaa.egg-info
+/.coverage
