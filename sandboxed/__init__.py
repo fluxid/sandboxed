@@ -14,15 +14,23 @@ from sandboxed import const
 from sandboxed.utils import mount_bind, mount_tmpfs, mount_proc, mount_cgroup, umount_all
 
 class Jail:
-    def __init__(self, fs_size=2000, gname=None, uname=None, hostname=None):
+    def __init__(self, fs_size=2000, gname=None, uname=None, hostname=None, ignore_mounts=None, remount_ro=True):
         self.fs_size = fs_size
         self.gname = gname
         self.uname = uname
         self.hostname = hostname
+        self.ignore_mounts = ignore_mounts
+        self.remount_ro = remount_ro
 
     def setup_fs(self, path):
         '''
         Setup filesystem before entering jail
+        '''
+        pass
+
+    def teardown_fs(self, path):
+        '''
+        If needed, unload/unmount/remove anything that was set up in setup_fs
         '''
         pass
 
@@ -42,6 +50,7 @@ class Jail:
         '''
         Set ups jail and runs prisoner
         '''
+
         # Get desired gid and uid
         gid = None
         uid = None
@@ -92,6 +101,8 @@ class Jail:
                     if pid2 == pid:
                         break
 
+            self.teardown_fs(tmp)
+
             # Umount tmpfs and remove mountpoint
             umount(tmp)
             os.rmdir(tmp)
@@ -116,14 +127,18 @@ class Jail:
             mount_cgroup()
             
             # Umount all filesystems but those we set up by ourselves
-            umount_all(('/', '/proc', '/cgroup'))
-            # Remove evidence ;)
+            ignore_mounts = ['/', '/proc', '/cgroup']
+            if self.ignore_mounts:
+                ignore_mounts.extend(self.ignore_mounts)
+            umount_all(ignore_mounts)
+            # Remove evidence of old root ;)
             os.rmdir('/' + put_old)
 
             self.setup_jail()
 
             # Remount tmpfs r/o
-            mount_tmpfs(2000, '/', const.MS_REMOUNT | const.MS_RDONLY)
+            if self.remount_ro:
+                mount_tmpfs(self.fs_size, '/', const.MS_REMOUNT | const.MS_RDONLY)
 
             # Set to desired gid/uid
             if gid:
