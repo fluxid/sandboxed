@@ -38,7 +38,7 @@ def main():
     assert pid is not None
     if pid:
         # TODO catch KeyboardInterrupt
-        pid, status = os.waitpid(-1, WALL)
+        pid, status = os.waitpid(pid, WALL)
 
         # Umount tmpfs and remove mountpoint
         umount(tmp)
