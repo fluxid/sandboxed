@@ -81,3 +81,8 @@ MNT_FORCE = 1
 MNT_DETACH = 2
 MNT_EXPIRE = 4
 UMOUNT_NOFOLLOW = 8
+
+# bits/waitflags.h
+
+WALL = 0x40000000
+
