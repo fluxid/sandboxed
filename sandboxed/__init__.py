@@ -1,6 +1,6 @@
 #coding:utf8
 
-from code import interact
+import errno
 import grp
 import os
 import os.path
