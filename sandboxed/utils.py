@@ -8,6 +8,7 @@ import distutils.sysconfig
 import errno
 import os
 import os.path
+import stat
 import time
 
 from . import lowlevel
@@ -54,7 +55,17 @@ def mount_cgroup(path = '/cgroup'):
     try_mkdir(path)
     lowlevel.mount('cgroup', path, 'cgroup', 0, None)
 
-def mount_python_lib(path):
+def mount_simple_dev(path = '/dev'):
+    '''
+    Creates mountpoint and mounts cgroup fs in it
+    '''
+    try_mkdir(path)
+    flags = const.MS_NOEXEC | const.MS_NOSUID | const.MS_NOATIME
+    lowlevel.mount('simple_dev', path, 'tmpfs', flags, 'size=1024k')
+    os.mknod(os.path.join(path, 'null'), 0o777, stat.S_IFCHR | os.makedev(1, 3))
+    os.mknod(os.path.join(path, 'zero'), 0o777, stat.S_IFCHR | os.makedev(1, 5))
+
+def mount_python_lib(path, no_exec = False):
     '''
     Uses bind to mount Python standard library in given path.
 
@@ -73,7 +84,9 @@ def mount_python_lib(path):
         # exist_ok since Python 3.2
         os.makedirs(pylib_mount)
 
-    flags = const.MS_NODEV | const.MS_NOEXEC | const.MS_NOSUID | const.MS_NOATIME
+    flags = const.MS_NODEV | const.MS_NOSUID | const.MS_NOATIME
+    if no_exec:
+        flags |= const.MS_NOEXEC
     mount_bind(pylib, pylib_mount, flags)
     # Binds can be made read-only only after remount, not on first mount...
     flags |= const.MS_REMOUNT | const.MS_RDONLY
