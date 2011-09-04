@@ -5,6 +5,7 @@ Example jailed Python REPL
 '''
 
 from code import interact
+import os
 import resource
 
 from sandboxed import Jail
@@ -21,8 +22,11 @@ class InteractiveJail(Jail):
     def teardown_fs(self, path):
         umount(self.pylib_mount)
 
-    def prisoner(self):
+    def setup_jail(self):
+        os.environ.clear()
         resource.setrlimit(resource.RLIMIT_NPROC, (1,1))
+
+    def prisoner(self):
         interact()
 
 def main():
