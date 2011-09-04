@@ -9,18 +9,33 @@ import signal
 import sys
 import tempfile
 
-from sandboxed.lowlevel import clone, sethostname, getpid, umount, pivot_root
+from sandboxed.lowlevel import (
+    clone,
+    getpid,
+    pivot_root,
+    sethostname,
+    umount,
+)
 from sandboxed import const
-from sandboxed.utils import mount_bind, mount_tmpfs, mount_proc, mount_cgroup, umount_all
+from sandboxed.utils import (
+    mount_bind,
+    mount_cgroup,
+    mount_simple_dev,
+    mount_proc,
+    mount_tmpfs,
+    umount_all,
+)
 
 class Jail:
-    def __init__(self, fs_size=2000, gname=None, uname=None, hostname=None, ignore_mounts=None, remount_ro=True):
+    def __init__(self, fs_size=2000, gname=None, uname=None, hostname=None, ignore_mounts=None, remount_ro=True, mount_cgroup=False, mount_dev=False):
         self.fs_size = fs_size
         self.gname = gname
         self.uname = uname
         self.hostname = hostname
         self.ignore_mounts = ignore_mounts
         self.remount_ro = remount_ro
+        self.mount_cgroup = mount_cgroup
+        self.mount_dev = mount_dev
 
     def setup_fs(self, path):
         '''
@@ -83,29 +98,30 @@ class Jail:
         )
         assert pid is not None
         if pid:
-            while True:
-                try:
-                    pid2, status = os.waitpid(pid, const.WALL)
-                except KeyboardInterrupt:
+            try:
+                while True:
                     try:
-                        os.kill(pid, signal.SIGKILL)
+                        pid2, status = os.waitpid(pid, const.WALL)
+                    except KeyboardInterrupt:
+                        try:
+                            os.kill(pid, signal.SIGTERM)
+                        except OSError as exc:
+                            if exc.errno == errno.ESRCH:
+                                break
+                            raise
                     except OSError as exc:
-                        if exc.errno == errno.ESRCH:
+                        if exc.errno == errno.ECHILD:
                             break
                         raise
-                except OSError as exc:
-                    if exc.errno == errno.ECHILD:
-                        break
-                    raise
-                else:
-                    if pid2 == pid:
-                        break
+                    else:
+                        if pid2 == pid:
+                            break
+            finally:
+                self.teardown_fs(tmp)
 
-            self.teardown_fs(tmp)
-
-            # Umount tmpfs and remove mountpoint
-            umount(tmp)
-            os.rmdir(tmp)
+                # Umount tmpfs and remove mountpoint
+                umount(tmp)
+                os.rmdir(tmp)
             
             #print('Child {} exited with status {}'.format(pid, status))
             sys.exit(status)
@@ -122,14 +138,21 @@ class Jail:
             pivot_root(tmp, old_root)
             os.chdir('/')
 
-            # Mount /proc and /cgroup
-            mount_proc()
-            mount_cgroup()
-            
-            # Umount all filesystems but those we set up by ourselves
-            ignore_mounts = ['/', '/proc', '/cgroup']
+            # Which mountoints to ignore
+            ignore_mounts = ['/', '/proc']
             if self.ignore_mounts:
                 ignore_mounts.extend(self.ignore_mounts)
+
+            # Mount /proc, /cgroup and /dev
+            mount_proc()
+            if self.mount_cgroup:
+                mount_cgroup()
+                ignore_mounts.append('/cgroup')
+            if self.mount_dev:
+                mount_simple_dev()
+                ignore_mounts.append('/dev')
+            
+            # Umount all filesystems but those we set up by ourselves
             umount_all(ignore_mounts)
             # Remove evidence of old root ;)
             os.rmdir('/' + put_old)
