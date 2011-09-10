@@ -15,13 +15,51 @@ import socket
 import sys
 import time
 import traceback
+import errno
+import grp
+import os
+import os.path
+import pwd
+import signal
+import sys
+import tempfile
 
-from sandboxed import Jail
-from sandboxed.utils import mount_python_lib
-from sandboxed.lowlevel import umount
+from sandboxed import const
+from sandboxed.lowlevel import (
+    pivot_root,
+    sethostname,
+    umount,
+)
+from sandboxed.utils import (
+    clone_and_wait,
+    mount_simple_dev,
+    mount_proc,
+    mount_python_lib,
+    mount_tmpfs,
+    patient_terminate,
+    try_kill,
+    umount_all,
+    wait_for_pid,
+)
 
-class ExecJail(Jail):
-    def __init__(self, socket_file, *args, **kwargs):
+try:
+    PIPE_BUF = select.PIPE_BUF
+except AttributeError:
+    PIPE_BUF = 512
+
+_old_sigterm = signal.getsignal(signal.SIGTERM)
+_old_sigint = signal.getsignal(signal.SIGINT)
+def reset_signals():
+    signal.signal(signal.SIGTERM, _old_sigterm)
+    signal.signal(signal.SIGINT, _old_sigint)
+
+class Jail:
+    def __init__(self, socket_file, fs_size=2000, gname=None, uname=None, hostname=None):
+        self.fs_size = fs_size
+        self.gid = grp.getgrnam(gname).gr_gid
+        self.uid = pwd.getpwnam(uname).pw_uid
+        self.hostname = hostname
+
         if os.path.exists(socket_file):
             os.remove(socket_file)
 
@@ -33,38 +71,23 @@ class ExecJail(Jail):
 
         self.sock_info = sock, fd
 
-        super(ExecJail, self).__init__(*args, **kwargs)
-
-    def setup_fs(self, path):
-        pylib, pylib_mount = mount_python_lib(path)
-        self.pylib_mount = pylib_mount
-        self.ignore_mounts = self.ignore_mounts or []
-        self.ignore_mounts.append(pylib)
-
-    def teardown_fs(self, path):
-        umount(self.pylib_mount)
-
-    def setup_jail(self):
-        os.environ.clear()
-
-    def prisoner(self):
+    def setup_workers(self):
         sock, fd = self.sock_info
 
         pids = set()
         running = True
 
         def wait_for_pids():
-            if pids:
-                while True:
-                    try:
-                        pid, status = os.waitpid(0, os.WNOHANG)
-                    except OSError as exc:
-                        if exc.errno == errno.ECHILD:
-                            break
-                        raise
-                    if pid in pids:
-                        pids.remove(pid)
-                        print('removing pid: {} status: {} workers: {}'.format(pid, status, len(pids)))
+            while True:
+                try:
+                    pid, status = os.waitpid(0, os.WNOHANG)
+                except OSError as exc:
+                    if exc.errno == errno.ECHILD:
+                        break
+                    raise
+                if pid in pids:
+                    pids.remove(pid)
+                    print('removing pid: {} status: {} workers: {}'.format(pid, status, len(pids)))
 
         def handle_signal(signum, frame):
             nonlocal running, pids
@@ -107,33 +130,17 @@ class ExecJail(Jail):
             sock.close()
 
     def process_connection(self, connection):
-        my_stdout = io.StringIO()
+        pid = None
 
         def exit(status):
-            connection.sendall(my_stdout.getvalue().encode('utf-8'))
+            if pid:
+                patient_terminate(pid)
             connection.send(b'\0')
             connection.close()
             os._exit(status)
 
         try:
-            resource.setrlimit(resource.RLIMIT_NPROC, (1,1))
-            mem_bytes = 1024*1024*5
-            resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
-            resource.setrlimit(resource.RLIMIT_CPU, (3, 5))
-            
-            def handle_signal(signum, frame):
-                if signum == signal.SIGALRM:
-                    print('Six seconds of execution passed, giving up')
-                elif signum == signal.SIGXCPU:
-                    print('Three seconds of CPU time passed, giving up')
-                else:
-                    print('Signal received')
-                exit(1)
-
-            signal.signal(signal.SIGALRM, handle_signal)
-            signal.signal(signal.SIGXCPU, handle_signal)
-            signal.signal(signal.SIGTERM, handle_signal)
-            signal.signal(signal.SIGINT, handle_signal)
+            reset_signals()
 
             in_data = io.BytesIO()
             continue_reading = True
@@ -147,23 +154,121 @@ class ExecJail(Jail):
                     continue_reading = False
                 in_data.write(data)
 
-            sys.stdout = sys.stderr = my_stdout
+            stuff_to_exec = in_data.getvalue()
+            del in_data
+
+            running = True
+
+            out_pipe, in_pipe = os.pipe()
+            sock_fd = connection.fileno()
+
+            pid = os.fork()
+            if not pid:
+                os.setgid(self.gid)
+                os.setuid(self.uid)
+
+                os.close(out_pipe)
+                os.dup2(in_pipe, sys.stdout.fileno())
+                os.dup2(in_pipe, sys.stderr.fileno())
+
+                mem_bytes = 1024*1024*100
+                resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
+                resource.setrlimit(resource.RLIMIT_NPROC, (1,1))
+
+                try:
+                    self.exec_worker(stuff_to_exec)
+                except:
+                    sys.excepthook(*sys.exc_info())
+                finally:
+                    os._exit(0)
+
+            os.close(in_pipe)
+
+            def handle_signal(signum, frame):
+                if signum == signal.SIGALRM:
+                    connection.send(b'Six seconds of execution passed, giving up')
+                else:
+                    connection.send(b'Signal received')
+                exit(1)
+
+            signal.signal(signal.SIGALRM, handle_signal)
+            signal.signal(signal.SIGTERM, handle_signal)
+            signal.signal(signal.SIGINT, handle_signal)
 
             signal.alarm(6)
             try:
-                globals_ = dict()
-                exec(in_data.getvalue(), globals_)
-            except:
-                del globals_
-                exception = traceback.print_exc()
+                while running:
+                    if wait_for_pid(pid, 1):
+                        running = False
+
+                    while True:
+                        try:
+                            cr, _, _ = select.select([out_pipe], [], [], 0.02)
+                        except select.error as exc:
+                            if exc.args[0] == errno.EINTR:
+                                break
+                            raise
+
+                        if not cr:
+                            break
+                        data = os.read(out_pipe, PIPE_BUF)
+                        if not data:
+                            break
+                        connection.send(data)
             finally:
                 signal.alarm(0)
+        except:
+            sys.excepthook(*sys.exc_info())
         finally:
             exit(0)
 
-def main():
-    ExecJail('socket', 2000, 'fluxid', 'fluxid', 'lolnope', remount_ro=True, mount_dev=True).run()
+    def exec_worker(self, stuff_to_exec):
+        dict_ = dict()
+        exec(stuff_to_exec, dict_)
+
+    def start(self):
+        tmp = tempfile.mkdtemp()
+        mount_tmpfs(self.fs_size, tmp)
+
+        put_old = 'root'
+        old_root = os.path.join(tmp, put_old)
+        os.mkdir(old_root)
+
+        pylib, pylib_mount = mount_python_lib(tmp)
+        ignore_mounts = ['/', '/proc', '/dev', pylib]
+
+        def jail():
+            os.environ.clear()
+
+            if self.hostname:
+                sethostname(self.hostname)
+
+            pivot_root(tmp, old_root)
+            os.chdir('/')
+
+            mount_proc()
+            mount_simple_dev()
+            umount_all(ignore_mounts)
+            os.rmdir('/' + put_old)
+
+            mount_tmpfs(self.fs_size, '/', const.MS_REMOUNT | const.MS_RDONLY)
+
+            self.setup_workers()
+
+        try:
+            pid = clone_and_wait(
+                jail,
+                const.CLONE_NEWNS |
+                const.CLONE_NEWPID |
+                const.CLONE_NEWUTS |
+                const.CLONE_NEWNET |
+                const.CLONE_NEWIPC
+            )
+        finally:
+            umount(pylib_mount)
+            umount(tmp)
+            os.rmdir(tmp)
 
 if __name__ == '__main__':
-    main()
+    Jail('socket', 2000, 'fluxid', 'fluxid').start()
 
