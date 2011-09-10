@@ -25,12 +25,12 @@ __all__ = (
 # C Calls
 getpid = syscall(const.SYS_getpid)
 getppid = syscall(const.SYS_getppid)
-pivot_root = ccall('pivot_root', True, ct.c_int, ct.c_char_p, ct.c_char_p)
+_pivot_root = ccall('pivot_root', True, ct.c_int, ct.c_char_p, ct.c_char_p)
 _clone = syscall(const.SYS_clone, ct.c_int, ct.c_void_p)
 #_clone = ccall('clone', True, ct.c_int, ct.c_void_p, ct.c_void_p, ct.c_int, ct.c_void_p)
 _mount = ccall('mount', True, ct.c_int, ct.c_char_p, ct.c_char_p, ct.c_char_p, ct.c_ulong, ct.c_void_p)
-umount = ccall('umount', True, ct.c_int, ct.c_char_p)
-umount2 = ccall('umount2', True, ct.c_int, ct.c_char_p, ct.c_int)
+_umount = ccall('umount', True, ct.c_int, ct.c_char_p)
+_umount2 = ccall('umount2', True, ct.c_int, ct.c_char_p, ct.c_int)
 _sethostname = ccall('sethostname', True, ct.c_int, ct.c_char_p, ct.c_int)
 _gethostname = ccall('gethostname', True, ct.c_int, ct.c_char_p, ct.c_int)
 
@@ -59,6 +59,31 @@ def gethostname():
     return buf.value.decode()
 
 def mount(source, target, fs_type, flags = 0, data = None):
-    data = data.encode() if data else None
+    if isinstance(source, str):
+        source = source.encode()
+    if isinstance(target, str):
+        target = target.encode()
+    if isinstance(fs_type, str):
+        fs_type = fs_type.encode()
+    if isinstance(data, str):
+        data = data.encode()
+    data = data or None
     return _mount(source, target, fs_type, flags, data)
+
+def umount(target):
+    if isinstance(target, str):
+        target = target.encode()
+    return _umount(target)
+
+def umount2(target, flags):
+    if isinstance(target, str):
+        target = target.encode()
+    return _umount2(target, flags)
+
+def pivot_root(new_root, put_old):
+    if isinstance(new_root, str):
+        new_root = new_root.encode()
+    if isinstance(put_old, str):
+        put_old = put_old.encode()
+    return _pivot_root(new_root, put_old)
 
