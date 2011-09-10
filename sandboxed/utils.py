@@ -8,7 +8,9 @@ import distutils.sysconfig
 import errno
 import os
 import os.path
+import signal
 import stat
+import sys
 import time
 
 from . import lowlevel
@@ -134,4 +136,90 @@ def umount_all(except_mounts=None, tries=5):
 
     if unmounted:
         time.sleep(0.05)
+
+def clone_and_wait(callback, flags):
+    pid = lowlevel.clone(flags)
+    assert pid is not None
+    if pid:
+        def handle_signal(signum, frame):
+            patient_terminate(pid, wait_flags = const.WALL)
+
+        old_term = signal.getsignal(signal.SIGTERM)
+        old_int = signal.getsignal(signal.SIGINT)
+        signal.signal(signal.SIGTERM, handle_signal)
+        signal.signal(signal.SIGINT, handle_signal)
+
+        wait_for_pid(pid, flags = const.WALL)
+
+        signal.signal(signal.SIGTERM, old_term)
+        signal.signal(signal.SIGINT, old_int)
+    else:
+        status = 1
+        try:
+            if flags ^ const.CLONE_NEWPID:
+                assert lowlevel.getpid() == 1
+            status = callback()
+            status = int(status) if status else 0
+        except:
+            sys.excepthook(*sys.exc_info())
+        finally:
+            os._exit(status)
+        
+def wait_for_pid(pid, tries = 0, sleep = 0.1, flags = 0):
+    '''
+    Waits for child pid
+    Returns True if childs does not exist or waiting for it finished.
+    Returns False if tries > 0 and child doesn't quit or if wait
+    was interrupted.
+    Other children we wait for are ignored quietly.
+
+    `tries` sets count of times we try to wait for child.
+    `sleep` sets time we spend sleeping between waiting for child.
+    If `tries` is zero, we wait forever, until child quits.
+    '''
+    hang = not tries
+    if not hang:
+        flags |= os.WNOHANG
+    while hang or tries:
+        try:
+            pid2, _ = os.waitpid(pid, flags)
+        except OSError as exc:
+            if exc.errno == errno.ECHILD:
+                return True
+            elif exc.errno == errno.EINTR:
+                return False
+            raise
+        if pid2 == pid:
+            return True
+
+        if not hang:
+            if tries:
+                time.sleep(sleep)
+            tries -= 1
+    return False
+
+def try_kill(pid, signal):
+    '''
+    Tries to kill child.
+    Returns True if child does not exist.
+    Returns False otherwise.
+    '''
+    try:
+        os.kill(pid, signal)
+    except OSError as exc:
+        if exc.errno == errno.ECHILD:
+            return True
+    return False
+
+def patient_terminate(pid, wait_flags = 0):
+    '''
+    Sends SIGTERM, waits a second, sends SKIGKILL
+    '''
+    if wait_for_pid(pid, 1, flags = wait_flags):
+        return
+    try_kill(pid, signal.SIGTERM)
+    if wait_for_pid(pid, 10, flags = wait_flags):
+        return
+    try_kill(pid, signal.SIGKILL)
+    wait_for_pid(pid, flags = wait_flags)
 
