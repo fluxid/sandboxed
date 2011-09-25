@@ -172,7 +172,7 @@ class Jail:
                 resource.setrlimit(resource.RLIMIT_NPROC, (1,1))
 
                 try:
-                    os.execv('/usr/bin/python3', ('/usr/bin/python3', '/usr/bin/main.py'))
+                    os.execv('/usr/bin/python', ('/usr/bin/python', '/usr/bin/main.py'))
                 except:
                     sys.excepthook(*sys.exc_info())
                     os._exit(1)
