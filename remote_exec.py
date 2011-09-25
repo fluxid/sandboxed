@@ -5,6 +5,7 @@ Python executor by socket
 '''
 
 import errno
+import fcntl
 import io
 import os
 import os.path
@@ -32,15 +33,20 @@ from sandboxed.lowlevel import (
 )
 from sandboxed.utils import (
     clone_and_wait,
-    mount_simple_dev,
+    mount_bind,
     mount_proc,
-    mount_python_lib,
     mount_tmpfs,
     patient_terminate,
     try_kill,
+    try_mkdir,
     umount_all,
     wait_for_pid,
 )
+
+# Preload stuff
+# I gave up on mounting python library, so I have to do some stuff
+# to preload modules
+'abc'.encode('ANSI_X3.4-1968').decode('ANSI_X3.4-1968')
 
 try:
     PIPE_BUF = select.PIPE_BUF
@@ -54,11 +60,12 @@ def reset_signals():
     signal.signal(signal.SIGINT, _old_sigint)
 
 class Jail:
-    def __init__(self, socket_file, fs_size=2000, gname=None, uname=None, hostname=None):
+    def __init__(self, socket_file, fs_size=2000, gname=None, uname=None, hostname=None, usr_path=None):
         self.fs_size = fs_size
         self.gid = grp.getgrnam(gname).gr_gid
         self.uid = pwd.getpwnam(uname).pw_uid
         self.hostname = hostname
+        self.usr_path = usr_path
 
         if os.path.exists(socket_file):
             os.remove(socket_file)
@@ -142,24 +149,10 @@ class Jail:
         try:
             reset_signals()
 
-            in_data = io.BytesIO()
-            continue_reading = True
-            while continue_reading:
-                data = connection.recv(4096)
-                if not data:
-                    os._exit(1)
-                zeropos = data.find(b'\0')
-                if zeropos > -1:
-                    data = data[:zeropos]
-                    continue_reading = False
-                in_data.write(data)
-
-            stuff_to_exec = in_data.getvalue()
-            del in_data
-
             running = True
 
-            out_pipe, in_pipe = os.pipe()
+            in_r_pipe, in_w_pipe = os.pipe()
+            out_r_pipe, out_w_pipe = os.pipe()
             sock_fd = connection.fileno()
 
             pid = os.fork()
@@ -167,22 +160,25 @@ class Jail:
                 os.setgid(self.gid)
                 os.setuid(self.uid)
 
-                os.close(out_pipe)
-                os.dup2(in_pipe, sys.stdout.fileno())
-                os.dup2(in_pipe, sys.stderr.fileno())
+                os.close(in_w_pipe)
+                os.dup2(in_r_pipe, sys.stdin.fileno())
+
+                os.close(out_r_pipe)
+                os.dup2(out_w_pipe, sys.stdout.fileno())
+                os.dup2(out_w_pipe, sys.stderr.fileno())
 
                 mem_bytes = 1024*1024*100
                 resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))
                 resource.setrlimit(resource.RLIMIT_NPROC, (1,1))
 
                 try:
-                    self.exec_worker(stuff_to_exec)
+                    os.execv('/usr/bin/python3', ('/usr/bin/python3', '/usr/bin/main.py'))
                 except:
                     sys.excepthook(*sys.exc_info())
-                finally:
-                    os._exit(0)
+                    os._exit(1)
 
-            os.close(in_pipe)
+            os.close(out_w_pipe)
+            os.close(in_r_pipe)
 
             def handle_signal(signum, frame):
                 if signum == signal.SIGALRM:
@@ -196,24 +192,52 @@ class Jail:
             signal.signal(signal.SIGINT, handle_signal)
 
             signal.alarm(6)
+            continue_reading = True
+            continue_writing = True
             try:
                 while running:
                     if wait_for_pid(pid, 1):
                         running = False
 
-                    while True:
+                    while continue_writing:
                         try:
-                            cr, _, _ = select.select([out_pipe], [], [], 0.02)
+                            cr, cw, _ = select.select([connection], [in_w_pipe], [], 0.02)
                         except select.error as exc:
                             if exc.args[0] == errno.EINTR:
                                 break
                             raise
+                        if not (cr and cw):
+                            break
 
-                        if not cr:
-                            break
-                        data = os.read(out_pipe, PIPE_BUF)
+                        data = connection.recv(PIPE_BUF)
                         if not data:
+                            # Socket disconnected, give up
+                            exit(1)
+
+                        zeropos = data.find(b'\0')
+                        if zeropos > -1:
+                            data = data[:zeropos]
+                            continue_writing = False
+
+                        os.write(in_w_pipe, data)
+                        if not continue_writing:
+                            os.close(in_w_pipe)
+
+                    while continue_reading:
+                        try:
+                            cr, cw, _ = select.select([out_r_pipe], [connection], [], 0.02)
+                        except select.error as exc:
+                            if exc.args[0] == errno.EINTR:
+                                break
+                            raise
+                        if not (cr and cw):
                             break
+
+                        data = os.read(out_r_pipe, PIPE_BUF)
+                        if not data:
+                            continue_reading = False
+                            break
+
                         connection.send(data)
             finally:
                 signal.alarm(0)
@@ -221,10 +245,6 @@ class Jail:
             sys.excepthook(*sys.exc_info())
         finally:
             exit(0)
-
-    def exec_worker(self, stuff_to_exec):
-        dict_ = dict()
-        exec(stuff_to_exec, dict_)
 
     def start(self):
         tmp = tempfile.mkdtemp()
@@ -234,11 +254,20 @@ class Jail:
         old_root = os.path.join(tmp, put_old)
         os.mkdir(old_root)
 
-        pylib, pylib_mount = mount_python_lib(tmp)
-        ignore_mounts = ['/', '/proc', '/dev', pylib]
+        usr_mount = os.path.join(tmp, 'usr')
+        try_mkdir(usr_mount)
+        flags = const.MS_NODEV | const.MS_NOSUID | const.MS_NOATIME
+        mount_bind(self.usr_path, usr_mount, flags)
+        flags |= const.MS_REMOUNT | const.MS_RDONLY
+        mount_bind(self.usr_path, usr_mount, flags)
+        ignore_mounts = ['/', '/proc', '/usr']
 
         def jail():
             os.environ.clear()
+            os.environ.update(
+                PATH = '/usr/bin',
+                HOME = '/',
+            )
 
             if self.hostname:
                 sethostname(self.hostname)
@@ -247,9 +276,11 @@ class Jail:
             os.chdir('/')
 
             mount_proc()
-            mount_simple_dev()
             umount_all(ignore_mounts)
             os.rmdir('/' + put_old)
+            
+            os.symlink('/usr/lib', '/lib')
+            os.symlink('/usr/lib', '/lib64')
 
             mount_tmpfs(self.fs_size, '/', const.MS_REMOUNT | const.MS_RDONLY)
 
@@ -265,10 +296,10 @@ class Jail:
                 const.CLONE_NEWIPC
             )
         finally:
-            umount(pylib_mount)
+            umount(usr_mount)
             umount(tmp)
             os.rmdir(tmp)
 
 if __name__ == '__main__':
-    Jail('socket', 2000, 'fluxid', 'fluxid').start()
+    Jail('socket', 2000, 'fluxid', 'fluxid', 'lolnope', '/home/fluxid/main/py32mod').start()
 
