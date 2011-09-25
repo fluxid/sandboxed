@@ -16,6 +16,22 @@ import time
 from . import lowlevel
 from . import const
 
+__all__ = (
+    'clone_and_wait',
+    'mount_bind',
+    'mount_cgroup',
+    'mount_proc',
+    'mount_python_lib',
+    'mount_simple_dev',
+    'mount_tmpfs',
+    'patient_terminate',
+    'read_mounts',
+    'try_kill',
+    'try_mkdir',
+    'umount_all',
+    'wait_for_pid',
+)
+
 def try_mkdir(path):
     '''
     Wrapper of `os.mkdir`
@@ -209,6 +225,7 @@ def try_kill(pid, signal):
     except OSError as exc:
         if exc.errno == errno.ECHILD:
             return True
+        raise
     return False
 
 def patient_terminate(pid, wait_flags = 0):
